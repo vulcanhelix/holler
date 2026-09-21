@@ -45,9 +45,67 @@ CONTROLS = [
 _shared = None  # (loop, session)
 
 
+def _patch_session_manager():
+    # browser-use==0.13.10: attaches to every CDP target (workers, iframes, extension
+    # pages) and waits 2s for all to be ready. Attach to page targets only, cap the wait.
+    try:
+        from browser_use.browser.session_manager import SessionManager
+        from browser_use.utils import create_task_with_error_handling
+
+        if getattr(SessionManager, "_holler_fast_attach", False):
+            return
+        for name in ("_initialize_existing_targets", "_get_session_for_target", "get_lifecycle_events"):
+            if not hasattr(SessionManager, name):
+                return
+
+        async def _init_existing_targets(self):
+            cdp_client = self.browser_session._cdp_client_root
+            targets_result = await cdp_client.send.Target.getTargets()
+            target_ids = []
+            for t in targets_result.get("targetInfos", []):
+                if t.get("type") != "page" or t.get("url", "").startswith(("chrome://", "devtools://")):
+                    continue
+                try:
+                    await cdp_client.send.Target.attachToTarget(params={"targetId": t["targetId"], "flatten": True})
+                    target_ids.append(t["targetId"])
+                except Exception:
+                    pass
+            ready = asyncio.Event()
+
+            async def check_all_ready():
+                while True:
+                    if all(
+                        getattr(self._get_session_for_target(tid), "_lifecycle_events", None) is not None
+                        for tid in target_ids
+                    ):
+                        ready.set()
+                        return
+                    await asyncio.sleep(0.05)
+
+            check = create_task_with_error_handling(
+                check_all_ready(), name="check_all_targets_ready", logger_instance=self.logger
+            )
+            try:
+                await asyncio.wait_for(ready.wait(), timeout=0.5)
+            except TimeoutError:
+                pass
+            finally:
+                check.cancel()
+                try:
+                    await check
+                except asyncio.CancelledError:
+                    pass
+
+        SessionManager._initialize_existing_targets = _init_existing_targets
+        SessionManager._holler_fast_attach = True
+    except Exception:
+        pass
+
+
 def _get_session():
     global _shared
     if _shared is None:
+        _patch_session_manager()
         loop = asyncio.new_event_loop()
         session = BrowserSession(
             cdp_url=os.environ.get("BU_CDP_URL", "http://127.0.0.1:9222"),

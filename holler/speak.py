@@ -1,13 +1,19 @@
-"""One spoken line back: the blocked reason, or a Cerebras summary of the final page."""
+"""One spoken line back: streaming Deepgram TTS, a canned-phrase PCM cache, or macOS say."""
 
+import hashlib
 import json
 import os
 import subprocess
-import tempfile
+import threading
+from pathlib import Path
 
 import httpx
+import sounddevice as sd
 
 from .route import chat
+
+CANNED = {"stopped", "failed", "didn't get that", "the page didn't load"}
+CACHE_DIR = Path.home() / ".cache" / "holler" / "tts"
 
 SYSTEM = (
     "You answer the user's spoken request in ONE short spoken sentence, using "
@@ -18,33 +24,78 @@ SYSTEM = (
 )
 
 
+def _model():
+    return os.environ.get("DEEPGRAM_MODEL", "aura-2-thalia-en")
+
+
+def _canned_path(text):
+    digest = hashlib.sha1((_model() + text).encode()).hexdigest()
+    return CACHE_DIR / f"{digest}.pcm"
+
+
+def _play(pcm):
+    with sd.RawOutputStream(samplerate=24000, channels=1, dtype="int16") as out:
+        out.write(pcm)
+
+
+def _deepgram_pcm(text):
+    """Stream linear16 PCM from Deepgram, playing chunks as they land; returns the bytes."""
+    buf = bytearray()
+    tail = b""
+    with httpx.stream(
+        "POST",
+        "https://api.deepgram.com/v1/speak",
+        params={
+            "model": _model(),
+            "encoding": "linear16",
+            "sample_rate": "24000",
+            "container": "none",
+        },
+        headers={
+            "Authorization": f"Token {os.environ['DEEPGRAM_API_KEY']}",
+            "Content-Type": "application/json",
+        },
+        json={"text": text},
+        timeout=15,
+    ) as resp:
+        resp.raise_for_status()
+        with sd.RawOutputStream(samplerate=24000, channels=1, dtype="int16") as out:
+            for chunk in resp.iter_bytes(chunk_size=4800):
+                data = tail + chunk
+                if len(data) % 2:
+                    data, tail = data[:-1], data[-1:]
+                else:
+                    tail = b""
+                if data:
+                    out.write(data)
+                    buf += data
+    return bytes(buf) + tail
+
+
 def say(text):
     print(f"say: {text}", flush=True)
     if os.environ.get("DEEPGRAM_API_KEY"):
         try:
-            resp = httpx.post(
-                "https://api.deepgram.com/v1/speak",
-                params={"model": os.environ.get("DEEPGRAM_MODEL", "aura-2-thalia-en")},
-                headers={
-                    "Authorization": f"Token {os.environ['DEEPGRAM_API_KEY']}",
-                    "Content-Type": "application/json",
-                },
-                json={"text": text},
-                timeout=15,
-            )
-            resp.raise_for_status()
-            fd, path = tempfile.mkstemp(suffix=".mp3")
-            try:
-                with os.fdopen(fd, "wb") as f:
-                    f.write(resp.content)
-                subprocess.run(["afplay", path], check=False)
-            finally:
-                os.unlink(path)
+            path = _canned_path(text) if text in CANNED else None
+            if path is not None and path.exists():
+                _play(path.read_bytes())
+                return
+            pcm = _deepgram_pcm(text)
+            if path is not None:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(pcm)
             return
         except Exception as e:
             print(f"deepgram tts failed ({e}); falling back to say", flush=True)
     voice = os.environ.get("HOLLER_VOICE")
     subprocess.run(["say", *(["-v", voice] if voice else []), text], check=False)
+
+
+def say_async(text):
+    """Speak on a daemon thread; returns the thread."""
+    t = threading.Thread(target=say, args=(text,), daemon=True)
+    t.start()
+    return t
 
 
 def speak_result(state, transcript, *, call_llm=None):

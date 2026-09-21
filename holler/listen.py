@@ -1,9 +1,13 @@
 """Push-to-talk: hold a key, speak, release. Returns the transcript. No wake word."""
 
+import asyncio
 import io
+import json
 import os
+import queue
 import threading
 import wave
+from urllib.parse import quote
 
 import httpx
 import numpy as np
@@ -44,6 +48,110 @@ def _wav_bytes(audio):
         w.setframerate(SAMPLE_RATE)
         w.writeframes((audio * 32767).clip(-32768, 32767).astype("<i2").tobytes())
     return buf.getvalue()
+
+
+def _keyterms():
+    """Site alias names + mishearing targets — Deepgram Nova-3 keyterm hints."""
+    try:
+        from .route import load_aliases
+
+        sites, mishearings = load_aliases()
+        return sorted(set(sites) | set(mishearings.values()))
+    except Exception:
+        return []
+
+
+class _DGStream:
+    """Deepgram live transcription on a background thread with its own asyncio loop."""
+
+    def __init__(self, keyterms):
+        self._q = queue.Queue()
+        self._keyterms = keyterms
+        self.finals = []
+        self.error = None
+        self._ws = None
+        self._loop = None
+        self._closed = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def start(self):
+        self._thread.start()
+
+    def feed(self, chunk):
+        """Push one int16 PCM chunk (or None to end the stream)."""
+        self._q.put_nowait(chunk)
+
+    def finish(self, timeout=3.0):
+        """Send CloseStream and wait for the socket to drain; returns the transcript."""
+        self._q.put_nowait(None)
+        if not self._closed.wait(timeout):
+            if self._loop and self._ws:
+                asyncio.run_coroutine_threadsafe(self._ws.close(), self._loop)
+            if not self._closed.wait(1.0):
+                raise TimeoutError("deepgram stream did not close")
+        if self.error:
+            raise self.error
+        return " ".join(self.finals).strip()
+
+    def _run(self):
+        try:
+            asyncio.run(self._main())
+        except Exception as e:
+            self.error = e
+        finally:
+            self._closed.set()
+
+    async def _main(self):
+        import websockets  # lazy: only needed on the Deepgram path
+
+        url = (
+            "wss://api.deepgram.com/v1/listen?model=nova-3&encoding=linear16"
+            "&sample_rate=16000&channels=1&smart_format=true"
+            "&interim_results=true&endpointing=300"
+        )
+        url += "".join("&keyterm=" + quote(k, safe="") for k in self._keyterms)
+        self._loop = asyncio.get_running_loop()
+        async with websockets.connect(
+            url,
+            additional_headers={"Authorization": f"Token {os.environ['DEEPGRAM_API_KEY']}"},
+        ) as ws:
+            self._ws = ws
+
+            async def sender():
+                while True:
+                    try:
+                        chunk = self._q.get_nowait()
+                    except queue.Empty:
+                        await asyncio.sleep(0.02)
+                        continue
+                    if chunk is None:
+                        await ws.send('{"type": "CloseStream"}')
+                        return
+                    await ws.send(chunk)
+
+            send_task = asyncio.ensure_future(sender())
+            try:
+                async for raw in ws:
+                    try:
+                        msg = json.loads(raw)
+                    except ValueError:
+                        continue
+                    if msg.get("is_final"):
+                        alts = (msg.get("channel") or {}).get("alternatives") or [{}]
+                        t = (alts[0].get("transcript") or "").strip()
+                        if t:
+                            self.finals.append(t)
+            finally:
+                send_task.cancel()
+
+
+def _stream_transcribe(chunk_iter, keyterms):
+    """Drive the Deepgram live socket with an iterable of int16 PCM chunks."""
+    stream = _DGStream(keyterms)
+    stream.start()
+    for chunk in chunk_iter:
+        stream.feed(chunk)
+    return stream.finish()
 
 
 def transcribe(audio):
@@ -92,18 +200,31 @@ def listen():
 
     listener = keyboard.Listener(on_press=on_press, on_release=on_release)
     listener.start()
-    chunks = []
+    pcm = []
     try:
         print(f"hold {os.environ.get('HOLLER_PTT_KEY', 'alt_r')} to talk", flush=True)
         pressed.wait()
         print("listening...", flush=True)
-        with sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="float32") as stream:
+        stream = _DGStream(_keyterms()) if os.environ.get("DEEPGRAM_API_KEY") else None
+        if stream:
+            stream.start()
+        with sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="int16") as mic:
             while not released.is_set():
-                data, _ = stream.read(SAMPLE_RATE // 10)
-                chunks.append(data.copy())
+                data, _ = mic.read(SAMPLE_RATE // 10)
+                pcm.append(data.copy())
+                if stream:
+                    stream.feed(data.tobytes())
     finally:
         listener.stop()
-    if not chunks:
+    if not pcm:
+        if stream:
+            stream.feed(None)
         return ""
+    if stream:
+        try:
+            return stream.finish()
+        except Exception:
+            pass
     print("transcribing...", flush=True)
-    return transcribe(np.concatenate(chunks).reshape(-1))
+    audio = np.concatenate(pcm).reshape(-1).astype(np.float32) / 32768
+    return transcribe(audio)

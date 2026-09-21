@@ -359,6 +359,7 @@ dependencies = [
     { name = "onnxruntime", marker = "platform_machine == 'x86_64' and sys_platform == 'darwin'" },
     { name = "pynput" },
     { name = "sounddevice" },
+    { name = "websockets" },
 ]
 
 [package.dev-dependencies]
@@ -376,6 +377,7 @@ requires-dist = [
     { name = "onnxruntime", marker = "platform_machine == 'x86_64' and sys_platform == 'darwin'", specifier = "<1.24" },
     { name = "pynput" },
     { name = "sounddevice" },
+    { name = "websockets", specifier = ">=15.0.1" },
 ]
 
 [package.metadata.requires-dev]
