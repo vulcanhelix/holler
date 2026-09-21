@@ -12,6 +12,8 @@ Voice -> [mlx-whisper](https://github.com/ml-explore/mlx-examples) -> Cerebras r
 4. `uv run holler` — grant Input Monitoring and allow Chrome remote debugging when prompted
 5. Hold Right-Option, speak, release. `uv run browser-harness --doctor` if the browser won't attach
 
+`uv run holler "open github"` runs one cycle with a typed command — no mic needed.
+
 `uv run pytest` runs the routing tests. Edit `aliases.toml` to teach it your site names.
 
 On Apple Silicon, speech-to-text is mlx-whisper; elsewhere it falls back to faster-whisper on CPU (same `HOLLER_WHISPER_MODEL` knob).

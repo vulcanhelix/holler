@@ -1,6 +1,7 @@
 """hold hotkey -> whisper -> route -> jev-ultrafast -> say. Loops until Ctrl-C."""
 
 import os
+import sys
 from pathlib import Path
 
 from jev_ultrafast import Agent
@@ -18,31 +19,37 @@ def _load_env(path=".env"):
             os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
 
 
+def run_once(transcript):
+    print(f'heard: "{transcript}"', flush=True)
+    task = route(transcript)
+    if task is None:
+        say("didn't get that")
+        return
+    print(f"-> {task['url']}")
+    for i, g in enumerate(task["goals"], 1):
+        print(f"  {i}. {g}")
+    state = None
+    try:
+        with Agent(task["url"], task["goals"]) as agent:
+            for state in agent.run():
+                print(state["elapsed_ms"], len(state["history"]), state["status"], flush=True)
+    except Exception as e:
+        print(f"agent failed: {e}", flush=True)
+        say("failed")
+        return
+    if state:
+        speak_result(state, transcript)
+
+
 def main():
     _load_env()
+    if len(sys.argv) > 1:  # uv run holler "open github" -- one shot, no mic
+        run_once(" ".join(sys.argv[1:]))
+        return
     while True:
         transcript = listen()
-        if not transcript:
-            continue
-        print(f'heard: "{transcript}"', flush=True)
-        task = route(transcript)
-        if task is None:
-            say("didn't get that")
-            continue
-        print(f"-> {task['url']}")
-        for i, g in enumerate(task["goals"], 1):
-            print(f"  {i}. {g}")
-        state = None
-        try:
-            with Agent(task["url"], task["goals"]) as agent:
-                for state in agent.run():
-                    print(state["elapsed_ms"], len(state["history"]), state["status"], flush=True)
-        except Exception as e:
-            print(f"agent failed: {e}", flush=True)
-            say("failed")
-            continue
-        if state:
-            speak_result(state, transcript)
+        if transcript:
+            run_once(transcript)
 
 
 if __name__ == "__main__":
