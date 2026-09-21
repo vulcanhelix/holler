@@ -21,11 +21,11 @@ ROUTE_SCHEMA = {
             "goals": {
                 "type": "array",
                 "items": {"type": "string"},
-                "minItems": 1,
                 "maxItems": 4,
             },
+            "clarify": {"type": "string"},
         },
-        "required": ["url", "goals"],
+        "required": ["url", "goals", "clarify"],
         "additionalProperties": False,
     },
 }
@@ -43,11 +43,17 @@ Return JSON {{"url": "...", "goals": ["...", ...]}}:
 - When the user asks to "check"/"tell me about" X, prefer a goal that READS
   what's already on the target page ("read the campaign reply counts") over
   navigating deeper — only open into things the user explicitly names.
+- When the user names a specific thing inside a site ("the X campaign"), make
+  the first goal search/filter the site's list for that name.
+- If the request is ambiguous — e.g. several things could match — return
+  {{"url": "", "goals": [], "clarify": "<one short spoken question>"}} instead
+  of guessing. Keep "clarify" empty when the request is clear.
 - The transcript may contain meta-instructions ("just google it", "actually").
   Follow the intent; never turn instruction words into a search query or URL.
-- "context" may hold the browser's current page and the previous request.
-  Follow-ups ("now check inbox two", "go back", "what about X") refer to that
-  page — reuse its URL unless the new request names a different site.
+- "context" may hold the browser's current page, the previous request, and a
+  clarifying question you asked. When "pending" is set, the new transcript is
+  the user's answer — merge it into the previous request. Follow-ups ("now
+  check inbox two", "go back") refer to the current page.
 """
 
 
@@ -94,8 +100,42 @@ def chat(system, user, *, schema=None):
     return resp.json()["choices"][0]["message"]["content"]
 
 
+DECIDE_SCHEMA = {
+    "name": "decide",
+    "strict": True,
+    "schema": {
+        "type": "object",
+        "properties": {
+            "status": {"type": "string"},
+            "url": {"type": "string"},
+            "goals": {"type": "array", "items": {"type": "string"}, "maxItems": 3},
+            "clarify": {"type": "string"},
+        },
+        "required": ["status", "url", "goals", "clarify"],
+        "additionalProperties": False,
+    },
+}
+
+DECIDE_SYSTEM = """You drive a browser agent one narrow step at a time. Given the user's
+request, the CURRENT page text, and actions already taken, return JSON
+{{"status": "done"|"continue"|"clarify", "url": "...", "goals": [...], "clarify": "..."}}:
+- "done": the request is satisfied by what's on the page or already done.
+- "continue": give 1-3 narrow next goals verifiable on this page. If the next
+  step needs a different site entirely, put its URL in "url".
+- "clarify": the user must choose first (e.g. several matching items) — put one
+  short spoken question in "clarify".
+Never repeat an action already taken. Never guess past what the page text shows.
+If the agent just blocked or made no progress, either propose a materially
+different approach or return done/clarify — do not repeat the same plan.
+"""
+
+
 def _route_llm(system, user):
     return json.loads(chat(system, user, schema=ROUTE_SCHEMA))
+
+
+def _decide_llm(system, user):
+    return json.loads(chat(system, user, schema=DECIDE_SCHEMA))
 
 
 def route(transcript, *, context=None, call_llm=None, aliases_path=None):
@@ -109,9 +149,12 @@ def route(transcript, *, context=None, call_llm=None, aliases_path=None):
         user["context"] = context
     try:
         out = call_llm(SYSTEM.format(sites=site_lines), json.dumps(user))
+        clarify = out.get("clarify") or ""
+        if clarify.strip():
+            return {"clarify": clarify.strip()}
         url = out["url"]
         goals = [g.strip() for g in out["goals"]]
-    except (AttributeError, KeyError, TypeError, ValueError):
+    except (AttributeError, KeyError, TypeError, ValueError, httpx.HTTPError):
         return None
     # If a named site's transcript mention produced a non-alias URL, force the alias —
     # unless the model deliberately chose another known site (e.g. "search X on google").
@@ -124,3 +167,35 @@ def route(transcript, *, context=None, call_llm=None, aliases_path=None):
     if not goals or len(goals) > 4 or any(not g or len(g) >= 120 for g in goals):
         return None
     return {"url": url, "goals": goals}
+
+
+def decide(request, page, history, *, call_llm=None):
+    """Given the request and the real current page, pick the next step.
+
+    Returns {"status": "done"} | {"status": "continue", "goals": [...], "url": str}
+    | {"clarify": str} | None (on failure).
+    """
+    call_llm = call_llm or _decide_llm
+    user = json.dumps({
+        "request": request,
+        "page": {
+            "url": page.get("url", ""),
+            "title": page.get("title", ""),
+            "text": (page.get("text") or "")[:4000],
+        },
+        "actions_taken": [h.get("action") for h in (history or [])][-10:],
+    })
+    try:
+        out = call_llm(DECIDE_SYSTEM, user)
+        clarify = (out.get("clarify") or "").strip()
+        if clarify or out.get("status") == "clarify":
+            return {"clarify": clarify or "can you say that another way?"}
+        if out.get("status") == "done":
+            return {"status": "done"}
+        goals = [g.strip() for g in (out.get("goals") or []) if isinstance(g, str)]
+        goals = [g for g in goals if g and len(g) < 120][:3]
+        if not goals:
+            return {"status": "done"}
+        return {"status": "continue", "goals": goals, "url": out.get("url") or ""}
+    except (AttributeError, KeyError, TypeError, ValueError, httpx.HTTPError):
+        return None

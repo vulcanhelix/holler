@@ -4,11 +4,12 @@ import os
 import sys
 import time
 from pathlib import Path
+from urllib.parse import urlparse
 
 from jev_ultrafast import Agent
 
 from .listen import abort_on_ptt_release, listen
-from .route import route
+from .route import decide, route
 from .speak import say, speak_result
 
 # Cerebras rejects jev's OpenRouter-style `reasoning` param with HTTP 400;
@@ -37,11 +38,36 @@ def _load_env(path=".env"):
             os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
 
 
+def _run_agent(agent):
+    """Run one agent phase; returns (last_state, aborted)."""
+    listener, abort = abort_on_ptt_release()  # tap PTT key to abort
+    state = None
+    try:
+        if os.environ.get("HOLLER_FOREGROUND"):
+            from browser_harness.helpers import cdp
+
+            cdp("Target.activateTarget", targetId=agent.browser.target)
+        for state in agent.run():
+            print(state["elapsed_ms"], len(state["history"]), state["status"], flush=True)
+            if abort.is_set():
+                break
+    except KeyboardInterrupt:
+        abort.set()
+    finally:
+        listener.stop()
+    return state, abort.is_set()
+
+
 def run_once(transcript, last):
     print(f'heard: "{transcript}"', flush=True)
     task = route(transcript, context=last or None)
     if task is None:
         say("didn't get that")
+        return
+    if "clarify" in task:
+        say(task["clarify"])
+        last["request"] = transcript
+        last["pending"] = task["clarify"]
         return
     print(f"-> {task['url']}")
     for i, g in enumerate(task["goals"], 1):
@@ -51,50 +77,86 @@ def run_once(transcript, last):
         record_dir = Path("runs") / str(int(time.time()))
         print(f"recording -> {record_dir}")
 
+    state, agent = None, None
     for attempt in range(2):
-        state, agent = None, None
-        listener, abort = abort_on_ptt_release()  # tap PTT key to abort
         try:
             agent = Agent(task["url"], task["goals"], record_dir=record_dir)
-            if os.environ.get("HOLLER_FOREGROUND"):
-                from browser_harness.helpers import cdp
-
-                cdp("Target.activateTarget", targetId=agent.browser.target)
-            for state in agent.run():
-                print(state["elapsed_ms"], len(state["history"]), state["status"], flush=True)
-                if abort.is_set():
-                    break
-        except KeyboardInterrupt:
-            abort.set()
+            state, aborted = _run_agent(agent)
         except Exception as e:
             if agent is not None:
                 agent.close()
             print(f"agent failed: {e}", flush=True)
             say("failed")
             return
-        finally:
-            listener.stop()
-        aborted = abort.is_set()
-        # Blocked with zero actions = the SPA hadn't rendered yet. Retry once.
-        dead = not aborted and state is not None and state["status"] == "blocked" and not state.get("history")
-        if aborted or dead or not os.environ.get("HOLLER_KEEP_TAB"):
-            agent.close()
         if aborted:
+            agent.close()
             print("aborted", flush=True)
             say("stopped")
             return
+        # Blocked with zero actions = the SPA hadn't rendered yet. Retry once.
+        dead = state["status"] == "blocked" and not state.get("history")
         if dead and attempt == 0:
+            agent.close()
             print("page was empty on load; retrying once", flush=True)
             continue
-        if os.environ.get("HOLLER_KEEP_TAB") and agent is not None:
-            try:  # jev pins 1120x780; unpin so a kept tab fits the real window
-                from browser_harness.helpers import cdp
-
-                cdp("Emulation.clearDeviceMetricsOverride", session_id=agent.browser.session)
-            except Exception:
-                pass
         break
+
+    # observe -> decide phases: the model sees the real page and picks the next
+    # step (or done / clarify). Same tab unless the model wants another site.
+    # A phase that adds no actions means the page can't advance — stop looping.
+    for _ in range(3):
+        prev_len = len(state["history"])
+        nxt = decide(transcript, state["page"], state["history"])
+        if not nxt or nxt.get("status") == "done":
+            break
+        if "clarify" in nxt:
+            agent.close()
+            say(nxt["clarify"])
+            last["request"] = transcript
+            last["pending"] = nxt["clarify"]
+            return
+        goals = nxt["goals"]
+        print("next:")
+        for g in goals:
+            print(f"  - {g}")
+        if nxt.get("url") and urlparse(nxt["url"]).netloc != urlparse(state["page"]["url"]).netloc:
+            agent.close()
+            try:
+                agent = Agent(nxt["url"], goals, record_dir=record_dir)
+            except Exception as e:
+                print(f"agent failed: {e}", flush=True)
+                say("failed")
+                return
+        else:
+            agent.state["goal"] = "\n".join(goals)
+            agent.state["status"] = "ready"
+        try:
+            state, aborted = _run_agent(agent)
+        except Exception as e:
+            agent.close()
+            print(f"agent failed: {e}", flush=True)
+            say("failed")
+            return
+        if aborted:
+            agent.close()
+            print("aborted", flush=True)
+            say("stopped")
+            return
+        if len(state["history"]) == prev_len:
+            print("no progress this phase; stopping", flush=True)
+            break
+
+    if agent is not None and os.environ.get("HOLLER_KEEP_TAB"):
+        try:  # jev pins 1120x780; unpin so a kept tab fits the real window
+            from browser_harness.helpers import cdp
+
+            cdp("Emulation.clearDeviceMetricsOverride", session_id=agent.browser.session)
+        except Exception:
+            pass
+    elif agent is not None:
+        agent.close()
     if state:
+        last.clear()
         last["url"] = (state.get("page") or {}).get("url") or task["url"]
         last["request"] = transcript
         speak_result(state, transcript)

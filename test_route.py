@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from holler.route import route
+from holler.route import decide, route
 
 ALIASES = """\
 [sites]
@@ -107,6 +107,28 @@ def test_context_reaches_the_model(aliases_path):
                  call_llm=call, aliases_path=aliases_path)
     assert task["url"] == "https://app.warmy.io"
     assert seen["user"]["context"]["url"] == "https://app.warmy.io"
+
+
+def test_decide_done():
+    def call(system, user):
+        return {"status": "done", "url": "", "goals": [], "clarify": ""}
+
+    page = {"url": "https://app.warmy.io", "title": "Warmy", "text": "inbox 14 healthy"}
+    assert decide("check inbox 14", page, [], call_llm=call) == {"status": "done"}
+
+
+def test_decide_continue_and_clarify():
+    def call(system, user):
+        return {"status": "continue", "url": "", "goals": ["open inbox 2"], "clarify": ""}
+
+    page = {"url": "https://app.warmy.io", "title": "", "text": ""}
+    out = decide("now check inbox two", page, [{"action": "clicked inboxes"}], call_llm=call)
+    assert out == {"status": "continue", "goals": ["open inbox 2"], "url": ""}
+
+    def ambiguous(system, user):
+        return {"status": "clarify", "url": "", "goals": [], "clarify": "which campaign?"}
+
+    assert decide("check the campaign", page, [], call_llm=ambiguous) == {"clarify": "which campaign?"}
 
 
 def test_bad_url_returns_none(aliases_path):

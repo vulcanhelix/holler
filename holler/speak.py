@@ -12,7 +12,9 @@ from .route import chat
 SYSTEM = (
     "You answer the user's spoken request in ONE short spoken sentence, using "
     "only the page text provided. Plain words, no markdown, no URLs, under 25 "
-    "words. If the answer is not on the page, say so in one sentence."
+    "words. If the answer is not on the page, say so in one sentence. The agent "
+    "status and last actions are provided — if it got blocked, say what it "
+    "found before failing, not just that it failed."
 )
 
 
@@ -48,16 +50,20 @@ def say(text):
 def speak_result(state, transcript, *, call_llm=None):
     """Speak one line about the final agent state. Returns the spoken text."""
     call_llm = call_llm or chat
-    if state.get("status") == "blocked":
-        history = state.get("history") or []
-        last = history[-1]["action"] if history else "no progress"
-        line = f"blocked, {last}"
-    else:
-        page = state.get("page") or {}
-        user = json.dumps({"request": transcript, "url": page.get("url", ""), "page_text": page.get("text", "")[:4000]})
-        try:
-            line = call_llm(SYSTEM, user).strip() or "done"
-        except Exception:
-            line = "done"
+    page = state.get("page") or {}
+    actions = [h.get("action", "") for h in (state.get("history") or [])][-5:]
+    user = json.dumps({
+        "request": transcript,
+        "status": state.get("status", ""),
+        "url": page.get("url", ""),
+        "last_actions": actions,
+        "page_text": page.get("text", "")[:4000],
+    })
+    try:
+        line = call_llm(SYSTEM, user).strip()
+    except Exception:
+        line = ""
+    if not line:
+        line = f"blocked, {actions[-1]}" if state.get("status") == "blocked" and actions else "done"
     say(line)
     return line
