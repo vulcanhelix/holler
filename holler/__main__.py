@@ -10,6 +10,20 @@ from .listen import listen
 from .route import route
 from .speak import say, speak_result
 
+# Cerebras rejects jev's OpenRouter-style `reasoning` param with HTTP 400.
+import jev_ultrafast.model as _jev_model
+
+_jev_post_json = _jev_model.post_json
+
+
+def _post_json_no_reasoning(url, key, body):
+    if "cerebras" in url:
+        body = {k: v for k, v in body.items() if k != "reasoning"}
+    return _jev_post_json(url, key, body)
+
+
+_jev_model.post_json = _post_json_no_reasoning
+
 
 def _load_env(path=".env"):
     for line in Path(path).read_text().splitlines() if Path(path).exists() else []:

@@ -1,8 +1,11 @@
 """Push-to-talk: hold a key, speak, release. Returns the transcript. No wake word."""
 
+import io
 import os
 import threading
+import wave
 
+import httpx
 import numpy as np
 import sounddevice as sd
 from pynput import keyboard
@@ -19,7 +22,30 @@ def _ptt_key():
         return keyboard.KeyCode.from_char(name)
 
 
+def _wav_bytes(audio):
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(SAMPLE_RATE)
+        w.writeframes((audio * 32767).clip(-32768, 32767).astype("<i2").tobytes())
+    return buf.getvalue()
+
+
 def transcribe(audio):
+    if key := os.environ.get("DEEPGRAM_API_KEY"):
+        resp = httpx.post(
+            "https://api.deepgram.com/v1/listen",
+            params={
+                "model": os.environ.get("DEEPGRAM_STT_MODEL", "nova-3"),
+                "smart_format": "true",
+            },
+            headers={"Authorization": f"Token {key}", "Content-Type": "audio/wav"},
+            content=_wav_bytes(audio),
+            timeout=20,
+        )
+        resp.raise_for_status()
+        return resp.json()["results"]["channels"][0]["alternatives"][0]["transcript"].strip()
     model = os.environ.get("HOLLER_WHISPER_MODEL", "mlx-community/whisper-large-v3-turbo")
     try:
         import mlx_whisper

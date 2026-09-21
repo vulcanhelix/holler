@@ -6,6 +6,8 @@ instantly = "https://app.instantly.ai"
 github = "https://github.com"
 gmail = "https://mail.google.com"
 notion = "https://www.notion.so"
+webuycars = "https://www.webuycars.co.za"
+google = "https://www.google.com"
 
 # Common whisper mishearings -> canonical spoken name above.
 [mishearings]
@@ -14,3 +16,7 @@ wormy = "warmy"
 "war me" = "warmy"
 "hey reach" = "heyreach"
 "hay reach" = "heyreach"
+"we buy cars" = "webuycars"
+"webikehires" = "webuycars"
+"we bike hires" = "webuycars"
+"webuicars" = "webuycars"
