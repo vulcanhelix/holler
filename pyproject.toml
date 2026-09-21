@@ -1,0 +1,29 @@
+[project]
+name = "holler"
+version = "0.1.0"
+description = "Voice-driven browser agent: push-to-talk, whisper, Jev, say."
+requires-python = ">=3.12"
+dependencies = [
+    "jev-ultrafast",
+    "httpx",
+    "mlx-whisper; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "faster-whisper; sys_platform != 'darwin' or platform_machine != 'arm64'",
+    # onnxruntime >=1.24 ships no Intel-Mac wheels; 1.23.x is the last that does.
+    "onnxruntime<1.24; sys_platform == 'darwin' and platform_machine == 'x86_64'",
+    "numpy",
+    "pynput",
+    "sounddevice",
+]
+
+[project.scripts]
+holler = "holler.__main__:main"
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.uv.sources]
+jev-ultrafast = { git = "https://github.com/browser-use/jev-ultrafast.git" }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

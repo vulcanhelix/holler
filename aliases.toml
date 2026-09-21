@@ -1,0 +1,16 @@
+# Spoken name -> URL. Say the name, Jev gets the site.
+[sites]
+warmy = "https://app.warmy.io"
+heyreach = "https://app.heyreach.io"
+instantly = "https://app.instantly.ai"
+github = "https://github.com"
+gmail = "https://mail.google.com"
+notion = "https://www.notion.so"
+
+# Common whisper mishearings -> canonical spoken name above.
+[mishearings]
+wormy = "warmy"
+"warm e" = "warmy"
+"war me" = "warmy"
+"hey reach" = "heyreach"
+"hay reach" = "heyreach"
