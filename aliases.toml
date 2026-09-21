@@ -8,6 +8,11 @@ gmail = "https://mail.google.com"
 notion = "https://www.notion.so"
 webuycars = "https://www.webuycars.co.za"
 google = "https://www.google.com"
+x = "https://x.com"
+twitter = "https://x.com"
+linkedin = "https://www.linkedin.com"
+calendar = "https://calendar.google.com"
+youtube = "https://www.youtube.com"
 
 # Common whisper mishearings -> canonical spoken name above.
 [mishearings]
