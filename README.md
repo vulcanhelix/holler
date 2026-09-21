@@ -14,6 +14,8 @@ Voice -> [mlx-whisper](https://github.com/ml-explore/mlx-examples) -> Cerebras r
 
 `uv run holler "open github"` runs one cycle with a typed command — no mic needed.
 
+Non-Chrome Chromium (Thorium, Arc, Edge, Brave): relaunch with `--remote-debugging-port=9222` and set `BU_CDP_URL=http://127.0.0.1:9222` in `.env`. Plain Chrome just needs the toggle at `chrome://inspect/#remote-debugging`.
+
 `uv run pytest` runs the routing tests. Edit `aliases.toml` to teach it your site names.
 
 On Apple Silicon, speech-to-text is mlx-whisper; elsewhere it falls back to faster-whisper on CPU (same `HOLLER_WHISPER_MODEL` knob).
