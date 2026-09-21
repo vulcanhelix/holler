@@ -96,6 +96,19 @@ def test_explicit_destination_wins_over_alias(aliases_path):
     assert task["url"] == "https://www.google.com"
 
 
+def test_context_reaches_the_model(aliases_path):
+    seen = {}
+
+    def call(system, user):
+        seen["user"] = json.loads(user)
+        return ok("https://app.warmy.io", "open inbox 2")
+
+    task = route("now check inbox two", context={"url": "https://app.warmy.io", "request": "open warmy"},
+                 call_llm=call, aliases_path=aliases_path)
+    assert task["url"] == "https://app.warmy.io"
+    assert seen["user"]["context"]["url"] == "https://app.warmy.io"
+
+
 def test_bad_url_returns_none(aliases_path):
     # No alias named, so the model's malformed URL reaches validation untouched.
     llm = fake_llm({"blorp": ok("not-a-url", "open the dashboard")})

@@ -42,6 +42,9 @@ Return JSON {{"url": "...", "goals": ["...", ...]}}:
   ("open the inboxes page", "read the warmup status"), under 12 words.
 - The transcript may contain meta-instructions ("just google it", "actually").
   Follow the intent; never turn instruction words into a search query or URL.
+- "context" may hold the browser's current page and the previous request.
+  Follow-ups ("now check inbox two", "go back", "what about X") refer to that
+  page — reuse its URL unless the new request names a different site.
 """
 
 
@@ -92,15 +95,17 @@ def _route_llm(system, user):
     return json.loads(chat(system, user, schema=ROUTE_SCHEMA))
 
 
-def route(transcript, *, call_llm=None, aliases_path=None):
+def route(transcript, *, context=None, call_llm=None, aliases_path=None):
     """Return {"url": str, "goals": [str, ...]} or None if routing fails."""
     sites, mishearings = load_aliases(aliases_path)
     heard = normalize(transcript, mishearings)
     call_llm = call_llm or _route_llm
     site_lines = "\n".join(f"{name} = {url}" for name, url in sites.items())
-    user = json.dumps({"heard": heard, "raw_transcript": transcript})
+    user = {"heard": heard, "raw_transcript": transcript}
+    if context:
+        user["context"] = context
     try:
-        out = call_llm(SYSTEM.format(sites=site_lines), user)
+        out = call_llm(SYSTEM.format(sites=site_lines), json.dumps(user))
         url = out["url"]
         goals = [g.strip() for g in out["goals"]]
     except (AttributeError, KeyError, TypeError, ValueError):

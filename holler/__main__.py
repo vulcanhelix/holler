@@ -37,9 +37,9 @@ def _load_env(path=".env"):
             os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
 
 
-def run_once(transcript):
+def run_once(transcript, last):
     print(f'heard: "{transcript}"', flush=True)
-    task = route(transcript)
+    task = route(transcript, context=last or None)
     if task is None:
         say("didn't get that")
         return
@@ -83,18 +83,21 @@ def run_once(transcript):
                 pass
         break
     if state:
+        last["url"] = (state.get("page") or {}).get("url") or task["url"]
+        last["request"] = transcript
         speak_result(state, transcript)
 
 
 def main():
     _load_env()
+    last = {}  # follow-up context: {"url", "request"} from the previous run
     if len(sys.argv) > 1:  # uv run holler "open github" -- one shot, no mic
-        run_once(" ".join(sys.argv[1:]))
+        run_once(" ".join(sys.argv[1:]), last)
         return
     while True:
         transcript = listen()
         if transcript:
-            run_once(transcript)
+            run_once(transcript, last)
 
 
 if __name__ == "__main__":
