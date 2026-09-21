@@ -2,6 +2,7 @@
 
 import os
 import sys
+import time
 from pathlib import Path
 
 from jev_ultrafast import Agent
@@ -45,10 +46,15 @@ def run_once(transcript):
     print(f"-> {task['url']}")
     for i, g in enumerate(task["goals"], 1):
         print(f"  {i}. {g}")
+    record_dir = None
+    if os.environ.get("HOLLER_RECORD"):
+        record_dir = Path("runs") / str(int(time.time()))
+        print(f"recording -> {record_dir}")
+
     for attempt in range(2):
         state, agent = None, None
         try:
-            agent = Agent(task["url"], task["goals"])
+            agent = Agent(task["url"], task["goals"], record_dir=record_dir)
             if os.environ.get("HOLLER_FOREGROUND"):
                 from browser_harness.helpers import cdp
 
@@ -68,6 +74,13 @@ def run_once(transcript):
         if dead and attempt == 0:
             print("page was empty on load; retrying once", flush=True)
             continue
+        if os.environ.get("HOLLER_KEEP_TAB") and agent is not None:
+            try:  # jev pins 1120x780; unpin so a kept tab fits the real window
+                from browser_harness.helpers import cdp
+
+                cdp("Emulation.clearDeviceMetricsOverride", session_id=agent.browser.session)
+            except Exception:
+                pass
         break
     if state:
         speak_result(state, transcript)
