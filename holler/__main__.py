@@ -7,7 +7,7 @@ from pathlib import Path
 
 from jev_ultrafast import Agent
 
-from .listen import listen
+from .listen import abort_on_ptt_release, listen
 from .route import route
 from .speak import say, speak_result
 
@@ -53,6 +53,7 @@ def run_once(transcript, last):
 
     for attempt in range(2):
         state, agent = None, None
+        listener, abort = abort_on_ptt_release()  # tap PTT key to abort
         try:
             agent = Agent(task["url"], task["goals"], record_dir=record_dir)
             if os.environ.get("HOLLER_FOREGROUND"):
@@ -61,16 +62,27 @@ def run_once(transcript, last):
                 cdp("Target.activateTarget", targetId=agent.browser.target)
             for state in agent.run():
                 print(state["elapsed_ms"], len(state["history"]), state["status"], flush=True)
+                if abort.is_set():
+                    break
+        except KeyboardInterrupt:
+            abort.set()
         except Exception as e:
             if agent is not None:
                 agent.close()
             print(f"agent failed: {e}", flush=True)
             say("failed")
             return
+        finally:
+            listener.stop()
+        aborted = abort.is_set()
         # Blocked with zero actions = the SPA hadn't rendered yet. Retry once.
-        dead = state is not None and state["status"] == "blocked" and not state.get("history")
-        if dead or not os.environ.get("HOLLER_KEEP_TAB"):
+        dead = not aborted and state is not None and state["status"] == "blocked" and not state.get("history")
+        if aborted or dead or not os.environ.get("HOLLER_KEEP_TAB"):
             agent.close()
+        if aborted:
+            print("aborted", flush=True)
+            say("stopped")
+            return
         if dead and attempt == 0:
             print("page was empty on load; retrying once", flush=True)
             continue

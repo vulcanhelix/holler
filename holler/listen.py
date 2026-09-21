@@ -14,12 +14,26 @@ SAMPLE_RATE = 16000
 _fw_model = None
 
 
-def _ptt_key():
+def ptt_key():
     name = os.environ.get("HOLLER_PTT_KEY", "alt_r").strip()
     try:
         return keyboard.Key[name]
     except KeyError:
         return keyboard.KeyCode.from_char(name)
+
+
+def abort_on_ptt_release():
+    """Start a listener that sets the event when the PTT key is released (a tap)."""
+    key = ptt_key()
+    abort = threading.Event()
+
+    def on_release(k):
+        if k == key:
+            abort.set()
+
+    listener = keyboard.Listener(on_release=on_release)
+    listener.start()
+    return listener, abort
 
 
 def _wav_bytes(audio):
@@ -64,7 +78,7 @@ def transcribe(audio):
 
 def listen():
     """Block until the push-to-talk key is held and released; return the transcript."""
-    key = _ptt_key()
+    key = ptt_key()
     pressed = threading.Event()
     released = threading.Event()
 

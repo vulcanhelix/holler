@@ -12,6 +12,8 @@ Voice -> [mlx-whisper](https://github.com/ml-explore/mlx-examples) -> Cerebras r
 4. `uv run holler` — grant Input Monitoring and allow Chrome remote debugging when prompted
 5. Hold Right-Option, speak, release. `uv run browser-harness --doctor` if the browser won't attach
 
+While an agent is working, **tap the PTT key** (or Ctrl-C) to abort — the tab closes and it says "stopped". Ctrl-C at the prompt quits holler.
+
 `uv run holler "open github"` runs one cycle with a typed command — no mic needed.
 
 Non-Chrome Chromium (Thorium, Arc, Edge, Brave): relaunch with `--remote-debugging-port=9222` and set `BU_CDP_URL=http://127.0.0.1:9222` in `.env`. Plain Chrome just needs the toggle at `chrome://inspect/#remote-debugging`.
