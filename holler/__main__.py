@@ -68,6 +68,8 @@ def run_once(transcript, last):
         say(task["clarify"])
         last["request"] = transcript
         last["pending"] = task["clarify"]
+        if task.get("url"):
+            last["url"] = task["url"]
         return
     print(f"-> {task['url']}")
     for i, g in enumerate(task["goals"], 1):
@@ -112,6 +114,7 @@ def run_once(transcript, last):
         if "clarify" in nxt:
             agent.close()
             say(nxt["clarify"])
+            last["url"] = (state.get("page") or {}).get("url") or task["url"]
             last["request"] = transcript
             last["pending"] = nxt["clarify"]
             return

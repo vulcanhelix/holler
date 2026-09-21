@@ -150,15 +150,16 @@ def route(transcript, *, context=None, call_llm=None, aliases_path=None):
     try:
         out = call_llm(SYSTEM.format(sites=site_lines), json.dumps(user))
         clarify = out.get("clarify") or ""
+        named = [n for n in sites if re.search(rf"\b{re.escape(n)}\b", heard)]
         if clarify.strip():
-            return {"clarify": clarify.strip()}
+            # keep the named site's URL so the clarified follow-up keeps its destination
+            return {"clarify": clarify.strip(), "url": sites.get(named[0], "") if named else ""}
         url = out["url"]
         goals = [g.strip() for g in out["goals"]]
     except (AttributeError, KeyError, TypeError, ValueError, httpx.HTTPError):
         return None
     # If a named site's transcript mention produced a non-alias URL, force the alias —
     # unless the model deliberately chose another known site (e.g. "search X on google").
-    named = [n for n in sites if re.search(rf"\b{re.escape(n)}\b", heard)]
     if named and url not in sites.values():
         url = sites[named[0]]
     parsed = urlparse(url) if isinstance(url, str) else None
