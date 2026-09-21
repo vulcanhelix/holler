@@ -40,6 +40,9 @@ Return JSON {{"url": "...", "goals": ["...", ...]}}:
 - url: the matching site URL above, or a well-known site's root URL if none matches.
 - goals: ordered, 1-4 items. Each is ONE thing verifiable on a single page
   ("open the inboxes page", "read the warmup status"), under 12 words.
+- When the user asks to "check"/"tell me about" X, prefer a goal that READS
+  what's already on the target page ("read the campaign reply counts") over
+  navigating deeper — only open into things the user explicitly names.
 - The transcript may contain meta-instructions ("just google it", "actually").
   Follow the intent; never turn instruction words into a search query or URL.
 - "context" may hold the browser's current page and the previous request.
