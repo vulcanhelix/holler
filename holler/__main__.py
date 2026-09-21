@@ -29,14 +29,22 @@ def run_once(transcript):
     for i, g in enumerate(task["goals"], 1):
         print(f"  {i}. {g}")
     state = None
+    agent = None
     try:
-        with Agent(task["url"], task["goals"]) as agent:
-            for state in agent.run():
-                print(state["elapsed_ms"], len(state["history"]), state["status"], flush=True)
+        agent = Agent(task["url"], task["goals"])
+        if os.environ.get("HOLLER_FOREGROUND"):
+            from browser_harness.helpers import cdp
+
+            cdp("Target.activateTarget", targetId=agent.browser.target)
+        for state in agent.run():
+            print(state["elapsed_ms"], len(state["history"]), state["status"], flush=True)
     except Exception as e:
         print(f"agent failed: {e}", flush=True)
         say("failed")
         return
+    finally:
+        if agent is not None and not os.environ.get("HOLLER_KEEP_TAB"):
+            agent.close()
     if state:
         speak_result(state, transcript)
 
