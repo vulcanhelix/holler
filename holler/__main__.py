@@ -10,7 +10,8 @@ from .listen import listen
 from .route import route
 from .speak import say, speak_result
 
-# Cerebras rejects jev's OpenRouter-style `reasoning` param with HTTP 400.
+# Cerebras rejects jev's OpenRouter-style `reasoning` param with HTTP 400;
+# qwen models also need reasoning_effort=none or they burn max_tokens thinking.
 import jev_ultrafast.model as _jev_model
 
 _jev_post_json = _jev_model.post_json
@@ -19,6 +20,8 @@ _jev_post_json = _jev_model.post_json
 def _post_json_no_reasoning(url, key, body):
     if "cerebras" in url:
         body = {k: v for k, v in body.items() if k != "reasoning"}
+        if "qwen" in body.get("model", ""):
+            body["reasoning_effort"] = "none"
     return _jev_post_json(url, key, body)
 
 

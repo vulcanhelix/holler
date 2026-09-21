@@ -62,8 +62,9 @@ def normalize(transcript, mishearings):
 def chat(system, user, *, schema=None):
     """One Cerebras chat completion; returns message content."""
     base = os.environ.get("CEREBRAS_BASE_URL", "https://api.cerebras.ai/v1").rstrip("/")
+    model = os.environ.get("CEREBRAS_MODEL", "gpt-oss-120b")
     body = {
-        "model": os.environ.get("CEREBRAS_MODEL", "gpt-oss-120b"),
+        "model": model,
         "temperature": 0,
         "max_tokens": 512,
         "messages": [
@@ -71,6 +72,10 @@ def chat(system, user, *, schema=None):
             {"role": "user", "content": user},
         ],
     }
+    # qwen models spend reasoning tokens before content; "none" is unsupported on gpt-oss.
+    effort = os.environ.get("CEREBRAS_REASONING_EFFORT") or ("none" if "qwen" in model else None)
+    if effort:
+        body["reasoning_effort"] = effort
     if schema:
         body["response_format"] = {"type": "json_schema", "json_schema": schema}
     resp = httpx.post(
