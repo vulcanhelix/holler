@@ -1,6 +1,7 @@
 """One spoken line back: the blocked reason, or a Cerebras summary of the final page."""
 
 import json
+import os
 import subprocess
 
 from .route import chat
@@ -14,7 +15,8 @@ SYSTEM = (
 
 def say(text):
     print(f"say: {text}", flush=True)
-    subprocess.run(["say", text], check=False)
+    voice = os.environ.get("HOLLER_VOICE")
+    subprocess.run(["say", *(["-v", voice] if voice else []), text], check=False)
 
 
 def speak_result(state, transcript, *, call_llm=None):
