@@ -3,6 +3,9 @@
 import json
 import os
 import subprocess
+import tempfile
+
+import httpx
 
 from .route import chat
 
@@ -15,6 +18,29 @@ SYSTEM = (
 
 def say(text):
     print(f"say: {text}", flush=True)
+    if os.environ.get("DEEPGRAM_API_KEY"):
+        try:
+            resp = httpx.post(
+                "https://api.deepgram.com/v1/speak",
+                params={"model": os.environ.get("DEEPGRAM_MODEL", "aura-2-thalia-en")},
+                headers={
+                    "Authorization": f"Token {os.environ['DEEPGRAM_API_KEY']}",
+                    "Content-Type": "application/json",
+                },
+                json={"text": text},
+                timeout=15,
+            )
+            resp.raise_for_status()
+            fd, path = tempfile.mkstemp(suffix=".mp3")
+            try:
+                with os.fdopen(fd, "wb") as f:
+                    f.write(resp.content)
+                subprocess.run(["afplay", path], check=False)
+            finally:
+                os.unlink(path)
+            return
+        except Exception as e:
+            print(f"deepgram tts failed ({e}); falling back to say", flush=True)
     voice = os.environ.get("HOLLER_VOICE")
     subprocess.run(["say", *(["-v", voice] if voice else []), text], check=False)
 
