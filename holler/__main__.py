@@ -42,23 +42,30 @@ def run_once(transcript):
     print(f"-> {task['url']}")
     for i, g in enumerate(task["goals"], 1):
         print(f"  {i}. {g}")
-    state = None
-    agent = None
-    try:
-        agent = Agent(task["url"], task["goals"])
-        if os.environ.get("HOLLER_FOREGROUND"):
-            from browser_harness.helpers import cdp
+    for attempt in range(2):
+        state, agent = None, None
+        try:
+            agent = Agent(task["url"], task["goals"])
+            if os.environ.get("HOLLER_FOREGROUND"):
+                from browser_harness.helpers import cdp
 
-            cdp("Target.activateTarget", targetId=agent.browser.target)
-        for state in agent.run():
-            print(state["elapsed_ms"], len(state["history"]), state["status"], flush=True)
-    except Exception as e:
-        print(f"agent failed: {e}", flush=True)
-        say("failed")
-        return
-    finally:
-        if agent is not None and not os.environ.get("HOLLER_KEEP_TAB"):
+                cdp("Target.activateTarget", targetId=agent.browser.target)
+            for state in agent.run():
+                print(state["elapsed_ms"], len(state["history"]), state["status"], flush=True)
+        except Exception as e:
+            if agent is not None:
+                agent.close()
+            print(f"agent failed: {e}", flush=True)
+            say("failed")
+            return
+        # Blocked with zero actions = the SPA hadn't rendered yet. Retry once.
+        dead = state is not None and state["status"] == "blocked" and not state.get("history")
+        if dead or not os.environ.get("HOLLER_KEEP_TAB"):
             agent.close()
+        if dead and attempt == 0:
+            print("page was empty on load; retrying once", flush=True)
+            continue
+        break
     if state:
         speak_result(state, transcript)
 

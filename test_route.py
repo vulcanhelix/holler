@@ -12,8 +12,11 @@ warmy = "https://app.warmy.io"
 heyreach = "https://app.heyreach.io"
 instantly = "https://app.instantly.ai"
 github = "https://github.com"
+google = "https://www.google.com"
+webuycars = "https://www.webuycars.co.za"
 
 [mishearings]
+"we buy cars" = "webuycars"
 wormy = "warmy"
 "warm e" = "warmy"
 """
@@ -84,6 +87,13 @@ def test_model_url_overridden_for_named_site(aliases_path):
     llm = fake_llm({"instantly": ok("https://instantly.ai.evil.example", "read the warmup status")})
     task = route("open instantly and show warmup status", call_llm=llm, aliases_path=aliases_path)
     assert task["url"] == "https://app.instantly.ai"
+
+
+def test_explicit_destination_wins_over_alias(aliases_path):
+    # "search we buy cars on google" — model chose google; the named alias must not override it.
+    llm = fake_llm({"webuycars": ok("https://www.google.com", "search for webuycars", "open the first result")})
+    task = route("search we buy cars on google and open the first result", call_llm=llm, aliases_path=aliases_path)
+    assert task["url"] == "https://www.google.com"
 
 
 def test_bad_url_returns_none(aliases_path):

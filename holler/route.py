@@ -100,11 +100,11 @@ def route(transcript, *, call_llm=None, aliases_path=None):
         goals = [g.strip() for g in out["goals"]]
     except (AttributeError, KeyError, TypeError, ValueError):
         return None
-    # A named site's URL wins over whatever the model guessed.
-    for name, site_url in sites.items():
-        if re.search(rf"\b{re.escape(name)}\b", heard):
-            url = site_url
-            break
+    # If a named site's transcript mention produced a non-alias URL, force the alias —
+    # unless the model deliberately chose another known site (e.g. "search X on google").
+    named = [n for n in sites if re.search(rf"\b{re.escape(n)}\b", heard)]
+    if named and url not in sites.values():
+        url = sites[named[0]]
     parsed = urlparse(url) if isinstance(url, str) else None
     if not parsed or parsed.scheme not in {"http", "https"} or not parsed.netloc:
         return None
