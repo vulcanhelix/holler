@@ -6,8 +6,6 @@ import time
 from pathlib import Path
 from urllib.parse import urlparse
 
-from jev_ultrafast import Agent
-
 from .listen import abort_on_ptt_release, listen
 from .route import decide, route
 from .speak import say, speak_result
@@ -28,6 +26,17 @@ def _post_json_no_reasoning(url, key, body):
 
 
 _jev_model.post_json = _post_json_no_reasoning
+
+
+def _agent_cls():
+    """HOLLER_AGENT=jev keeps the thin browser-harness driver; default is Jev on browser-use."""
+    if os.environ.get("HOLLER_AGENT", "bu") == "jev":
+        from jev_ultrafast import Agent
+
+        return Agent
+    from .jevbu import BUAgent
+
+    return BUAgent
 
 
 def _load_env(path=".env"):
@@ -82,7 +91,7 @@ def run_once(transcript, last):
     state, agent = None, None
     for attempt in range(2):
         try:
-            agent = Agent(task["url"], task["goals"], record_dir=record_dir)
+            agent = _agent_cls()(task["url"], task["goals"], record_dir=record_dir)
             state, aborted = _run_agent(agent)
         except Exception as e:
             if agent is not None:
@@ -125,7 +134,7 @@ def run_once(transcript, last):
         if nxt.get("url") and urlparse(nxt["url"]).netloc != urlparse(state["page"]["url"]).netloc:
             agent.close()
             try:
-                agent = Agent(nxt["url"], goals, record_dir=record_dir)
+                agent = _agent_cls()(nxt["url"], goals, record_dir=record_dir)
             except Exception as e:
                 print(f"agent failed: {e}", flush=True)
                 say("failed")
