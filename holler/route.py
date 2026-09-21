@@ -3,6 +3,7 @@
 import json
 import os
 import re
+import time
 import tomllib
 from pathlib import Path
 from urllib.parse import urlparse
@@ -90,12 +91,24 @@ def chat(system, user, *, schema=None):
         body["reasoning_effort"] = effort
     if schema:
         body["response_format"] = {"type": "json_schema", "json_schema": schema}
-    resp = httpx.post(
-        f"{base}/chat/completions",
-        headers={"Authorization": f"Bearer {os.environ['CEREBRAS_API_KEY']}"},
-        json=body,
-        timeout=15,
-    )
+    resp = None
+    for attempt in range(2):
+        try:
+            resp = httpx.post(
+                f"{base}/chat/completions",
+                headers={"Authorization": f"Bearer {os.environ['CEREBRAS_API_KEY']}"},
+                json=body,
+                timeout=15,
+            )
+        except httpx.TransportError:
+            if attempt:
+                raise
+            time.sleep(0.6)
+            continue
+        if (resp.status_code == 429 or resp.status_code >= 500) and not attempt:
+            time.sleep(0.6)
+            continue
+        break
     resp.raise_for_status()
     return resp.json()["choices"][0]["message"]["content"]
 
@@ -107,26 +120,31 @@ DECIDE_SCHEMA = {
         "type": "object",
         "properties": {
             "status": {"type": "string"},
+            "answer": {"type": "string"},
             "url": {"type": "string"},
             "goals": {"type": "array", "items": {"type": "string"}, "maxItems": 3},
             "clarify": {"type": "string"},
         },
-        "required": ["status", "url", "goals", "clarify"],
+        "required": ["status", "answer", "url", "goals", "clarify"],
         "additionalProperties": False,
     },
 }
 
-DECIDE_SYSTEM = """You drive a browser agent one narrow step at a time. Given the user's
-request, the CURRENT page text, and actions already taken, return JSON
-{{"status": "done"|"continue"|"clarify", "url": "...", "goals": [...], "clarify": "..."}}:
-- "done": the request is satisfied by what's on the page or already done.
+DECIDE_SYSTEM = """You drive a browser agent one narrow step at a time and answer the user by voice.
+Given the user's spoken request, the CURRENT page text, the agent status, and
+actions already taken, return JSON
+{"status": "done"|"continue"|"clarify", "answer": "...", "url": "...", "goals": [...], "clarify": "..."}:
+- "done": the request is answered by what is on the page or already done. Put
+  the spoken reply in "answer": ONE plain sentence under 25 words, no markdown,
+  no URLs, using only the page text. If the page does not contain the answer,
+  say what you found and that the rest is not visible.
 - "continue": give 1-3 narrow next goals verifiable on this page. If the next
-  step needs a different site entirely, put its URL in "url".
+  step needs a different site entirely, put its URL in "url". Leave "answer" empty.
 - "clarify": the user must choose first (e.g. several matching items) — put one
-  short spoken question in "clarify".
+  short spoken question in "clarify". Leave "answer" empty.
 Never repeat an action already taken. Never guess past what the page text shows.
-If the agent just blocked or made no progress, either propose a materially
-different approach or return done/clarify — do not repeat the same plan.
+If the agent blocked or made no progress, either propose a materially different
+approach or return done (with what was found) / clarify — do not repeat the plan.
 """
 
 
@@ -170,10 +188,10 @@ def route(transcript, *, context=None, call_llm=None, aliases_path=None):
     return {"url": url, "goals": goals}
 
 
-def decide(request, page, history, *, call_llm=None):
+def decide(request, page, history, status="", *, call_llm=None):
     """Given the request and the real current page, pick the next step.
 
-    Returns {"status": "done"} | {"status": "continue", "goals": [...], "url": str}
+    Returns {"status": "done", "answer": str} | {"status": "continue", "goals": [...], "url": str}
     | {"clarify": str} | None (on failure).
     """
     call_llm = call_llm or _decide_llm
@@ -185,18 +203,20 @@ def decide(request, page, history, *, call_llm=None):
             "text": (page.get("text") or "")[:4000],
         },
         "actions_taken": [h.get("action") for h in (history or [])][-10:],
+        "agent_status": status,
     })
     try:
         out = call_llm(DECIDE_SYSTEM, user)
         clarify = (out.get("clarify") or "").strip()
         if clarify or out.get("status") == "clarify":
             return {"clarify": clarify or "can you say that another way?"}
+        answer = (out.get("answer") or "").strip()
         if out.get("status") == "done":
-            return {"status": "done"}
+            return {"status": "done", "answer": answer}
         goals = [g.strip() for g in (out.get("goals") or []) if isinstance(g, str)]
         goals = [g for g in goals if g and len(g) < 120][:3]
         if not goals:
-            return {"status": "done"}
+            return {"status": "done", "answer": answer}
         return {"status": "continue", "goals": goals, "url": out.get("url") or ""}
     except (AttributeError, KeyError, TypeError, ValueError, httpx.HTTPError):
         return None

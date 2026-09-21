@@ -12,11 +12,24 @@ import json
 import os
 import time
 from pathlib import Path
+from urllib.parse import urlparse
 
 os.environ.setdefault("BROWSER_USE_LOGGING_LEVEL", "warning")
 
+from browser_use import BrowserSession
+from browser_use.browser.events import (
+    ClickElementEvent,
+    NavigateToUrlEvent,
+    ScrollEvent,
+    SelectDropdownOptionEvent,
+    SwitchTabEvent,
+    TypeTextEvent,
+)
+from browser_use.browser.profile import BrowserProfile
 from jev_ultrafast.model import choose, field_context, field_text
 from jev_ultrafast.questions import MAX_STEPS
+
+OBSERVE_TIMEOUT = float(os.environ.get("HOLLER_OBSERVE_TIMEOUT", "12"))
 
 FILL_TAGS = {"input", "textarea"}
 CLICK_TYPES = {"button", "submit", "checkbox", "radio", "file", "image", "reset", "range", "color", "date"}
@@ -29,18 +42,14 @@ CONTROLS = [
 ]
 
 
-class BUAgent:
-    def __init__(self, url, goals, *, record_dir=None, screenshots=None):
-        from browser_use import BrowserSession
-        from browser_use.browser.events import NavigateToUrlEvent
-        from browser_use.browser.profile import BrowserProfile
+_shared = None  # (loop, session)
 
-        task = goals.strip() if isinstance(goals, str) else "\n".join(goals).strip()
-        if not task:
-            raise ValueError("Supply a task")
-        self._loop = asyncio.new_event_loop()
-        self._current_map = {}
-        self.session = BrowserSession(
+
+def _get_session():
+    global _shared
+    if _shared is None:
+        loop = asyncio.new_event_loop()
+        session = BrowserSession(
             cdp_url=os.environ.get("BU_CDP_URL", "http://127.0.0.1:9222"),
             browser_profile=BrowserProfile(
                 cross_origin_iframes=False,
@@ -51,12 +60,66 @@ class BUAgent:
                 wait_for_network_idle_page_load_time=0.25,
             ),
         )
+        try:
+            loop.run_until_complete(session.start())
+        except Exception:
+            _shared = None
+            try:
+                loop.close()
+            except Exception:
+                pass
+            raise
+        _shared = (loop, session)
+    return _shared
+
+
+def shutdown():
+    """Stop the shared browser-use session (call once on holler exit)."""
+    global _shared
+    if _shared is None:
+        return
+    loop, session = _shared
+    _shared = None
+    try:
+        loop.run_until_complete(session.stop())
+    except Exception:
+        pass
+    try:
+        loop.close()
+    except Exception:
+        pass
+
+
+class BUAgent:
+    def __init__(self, url, goals, *, record_dir=None, screenshots=None):
+        task = goals.strip() if isinstance(goals, str) else "\n".join(goals).strip()
+        if not task:
+            raise ValueError("Supply a task")
+        self._loop, self.session = _get_session()
+        self._current_map = {}
+        self._masked = set()
+        self._last_fp = None
         self.record_dir = Path(record_dir) if record_dir else None
         self.screenshots = bool(screenshots or record_dir)
         try:
-            self._arun(self.session.start())
             self._arun(self._dispatch(NavigateToUrlEvent(url=url, new_tab=True)))
             self._sync_tab()
+            # browser-use no-ops the nav (warning only) when agent focus is mid-recovery,
+            # and recovery can also park focus on another live tab — confirm our tab
+            # really loaded the requested site before touching the page.
+            for _ in range(4):
+                try:
+                    landed = self._arun(self._eval("location.href")) or ""
+                except Exception:
+                    landed = ""
+                if self.browser.target and urlparse(landed).netloc == urlparse(url).netloc:
+                    break
+                self._arun(asyncio.sleep(0.4))
+                self._arun(self._dispatch(NavigateToUrlEvent(url=url, new_tab=True)))
+                self._sync_tab()
+            else:
+                raise RuntimeError(f"navigation to {url} did not land")
+            self._settle()
             page = self._observe()
         except Exception:
             self.close()
@@ -93,7 +156,9 @@ class BUAgent:
         self.browser = type("Tab", (), {"target": target_id, "session": session_id})()
 
     async def _eval(self, expression):
-        cdp_session = await self.session.get_or_create_cdp_session()
+        # Bind to our tab, not agent focus — focus can be stolen by recovery or the user.
+        target_id = getattr(getattr(self, "browser", None), "target", None)
+        cdp_session = await self.session.get_or_create_cdp_session(target_id, focus=False)
         result = await cdp_session.cdp_client.send.Runtime.evaluate(
             params={"expression": expression, "returnByValue": True},
             session_id=cdp_session.session_id,
@@ -103,35 +168,38 @@ class BUAgent:
     async def _dispatch(self, event):
         return await self.session.event_bus.dispatch(event)
 
+    def _settle(self, budget=float(os.environ.get("HOLLER_SETTLE_S", "4"))):
+        """Wait until body text is non-empty and stable across two polls, or the budget runs out."""
+        deadline, prev = time.perf_counter() + budget, None
+        while time.perf_counter() < deadline:
+            try:
+                got = self._arun(
+                    self._eval(
+                        "document.body ? [document.body.innerText.length,"
+                        " document.querySelectorAll('a,button,input,select,textarea,[role]').length]"
+                        " : [0, 0]"
+                    )
+                )
+                n, inter = got if isinstance(got, (list, tuple)) and len(got) == 2 else (0, 0)
+            except Exception:
+                n, inter = 0, 0
+            # SPA shells hold a tiny stable DOM before hydrating; only a substantive
+            # page counts as settled.
+            if (n, inter) == prev and (n >= 200 or inter >= 10):
+                return
+            prev = (n, inter)
+            self._arun(asyncio.sleep(0.25))
+
     def _observe(self):
         # Keep focus pinned to our tab — browser-use auto-recovers to ANY open tab on detach.
         if self.browser.target:
             try:
                 if getattr(self.session, "agent_focus_target_id", None) != self.browser.target:
-                    from browser_use.browser.events import SwitchTabEvent
-
                     self._arun(self._dispatch(SwitchTabEvent(target_id=self.browser.target)))
             except Exception:
                 pass
         # browser-use's clean-screenshot path stalls on this CDP attach; grab it raw instead.
-        summary = self._arun(self.session.get_browser_state_summary(include_screenshot=False))
-        try:
-            text = self._arun(self._eval("document.body ? document.body.innerText : ''")) or ""
-        except Exception:
-            text = ""
-        shot = None
-        if self.screenshots:
-            try:
-                cdp_session = self._arun(self.session.get_or_create_cdp_session())
-                r = self._arun(
-                    cdp_session.cdp_client.send.Page.captureScreenshot(
-                        params={"format": "jpeg", "quality": 72},
-                        session_id=cdp_session.session_id,
-                    )
-                )
-                shot = r.get("data")
-            except Exception:
-                pass
+        summary, text, shot = self._arun(self._observe_wait())
         # jev's snapshot only offered onscreen elements; cap near-viewport nodes so the
         # TypeSafe payload stays small enough for the API to accept.
         self._current_map = {
@@ -140,14 +208,61 @@ class BUAgent:
         actions = []
         for index, node in sorted(self._current_map.items()):
             actions.extend(self._node_actions(index, node))
-        actions = actions[:200]
-        return {
+        page = {
             "url": summary.url,
             "title": summary.title,
             "text": text[:8000],
-            "actions": actions + [dict(c) for c in CONTROLS],
+            "actions": actions,
             "screenshot": shot,
         }
+        page["fp"] = self._fingerprint(page)
+        page["actions"] = actions[:200] + [dict(c) for c in CONTROLS]
+        return page
+
+    async def _observe_wait(self):
+        # Retrying must wait on the SAME task — cancelling a mid-flight DOM build
+        # wedges the CDP session, so a restarted observe would time out too.
+        task = asyncio.ensure_future(self._observe_parts())
+        for _ in range(2):
+            done, _ = await asyncio.wait({task}, timeout=OBSERVE_TIMEOUT)
+            if done:
+                return task.result()
+        task.cancel()
+        raise RuntimeError("page observation timed out")
+
+    async def _observe_parts(self):
+        shot_coro = self._screenshot() if self.screenshots else asyncio.sleep(0)
+        summary, text, shot = await asyncio.gather(
+            self.session.get_browser_state_summary(include_screenshot=False),
+            self._eval("document.body ? document.body.innerText : ''"),
+            shot_coro,
+            return_exceptions=True,
+        )
+        if isinstance(summary, BaseException):
+            raise summary
+        return (
+            summary,
+            "" if isinstance(text, BaseException) else (text or ""),
+            None if isinstance(shot, BaseException) else shot,
+        )
+
+    async def _screenshot(self):
+        cdp_session = await self.session.get_or_create_cdp_session(self.browser.target, focus=False)
+        r = await cdp_session.cdp_client.send.Page.captureScreenshot(
+            params={"format": "jpeg", "quality": 72},
+            session_id=cdp_session.session_id,
+        )
+        return r.get("data")
+
+    @staticmethod
+    def _fingerprint(page):
+        return hash(
+            (
+                page["url"],
+                page["text"],
+                tuple((a["id"], a.get("label")) for a in page["actions"] if a.get("node") is not None),
+            )
+        )
 
     @staticmethod
     def _near_viewport(node):
@@ -215,17 +330,19 @@ class BUAgent:
                 )
             if actions:
                 return actions
-            return [{"id": f"N{index}", "kind": kind, "node": index, "label": label, **extra}]
+            return [
+                {
+                    "id": f"N{index}",
+                    "kind": kind,
+                    "node": index,
+                    "label": label,
+                    "value": attrs.get("value", label),
+                    **extra,
+                }
+            ]
         return [{"id": f"N{index}", "kind": kind, "node": index, "label": label, **extra}]
 
     def _act(self, action, text=None):
-        from browser_use.browser.events import (
-            ClickElementEvent,
-            ScrollEvent,
-            SelectDropdownOptionEvent,
-            TypeTextEvent,
-        )
-
         kind = action["kind"]
         if kind == "wait":
             self._arun(asyncio.sleep(0.5))
@@ -262,6 +379,23 @@ class BUAgent:
             page = self._observe()
             state["page"] = page
             self._record(page)
+            if state["history"]:
+                last = state["history"][-1]
+                if page["fp"] == self._last_fp:
+                    last["page_changed"] = False
+                    key = (last.get("id"), last.get("action"))
+                    if key not in self._masked:
+                        self._masked.add(key)
+                        print(f"masked: {last.get('action')}", flush=True)
+                else:
+                    last["page_changed"] = True
+                    self._masked.clear()
+            self._last_fp = page["fp"]
+            # An action that left the page identical gets hidden until the page changes — kills repeat loops.
+            if self._masked:
+                page["actions"] = [
+                    a for a in page["actions"] if (a["id"], a.get("label")) not in self._masked
+                ]
             decision = choose(page, state["goal"], state["history"])
             state["decision"] = decision
             choice = decision["choice"]
@@ -275,10 +409,13 @@ class BUAgent:
                 text, helper = field_text(field_context(state["goal"], action, page, state["history"]))
                 state.setdefault("text_calls", []).append({"model": helper["model"], "field": action["label"]})
             self._act(action, text)
+            if action["kind"] in {"click", "fill", "select"}:
+                self._settle(budget=1.5)
             old_url = page["url"]
             state["history"].append(
                 {
                     "step": len(state["history"]) + 1,
+                    "id": action["id"],
                     "action": action["label"],
                     "kind": action["kind"],
                     "text": text,
@@ -299,14 +436,11 @@ class BUAgent:
     def close(self):
         try:
             if getattr(self, "browser", None) and self.browser.target:
-                cdp_session = self._arun(self.session.get_or_create_cdp_session())
+                cdp_session = self._arun(
+                    self.session.get_or_create_cdp_session(self.browser.target, focus=False)
+                )
                 self._arun(
                     cdp_session.cdp_client.send.Target.closeTarget(params={"targetId": self.browser.target})
                 )
         except Exception:
             pass
-        try:
-            self._arun(self.session.stop())
-        except Exception:
-            pass
-        self._loop.close()

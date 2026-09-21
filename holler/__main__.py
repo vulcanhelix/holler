@@ -67,6 +67,11 @@ def _run_agent(agent):
     return state, abort.is_set()
 
 
+def _fail(e):
+    print(f"agent failed: {e}", flush=True)
+    say(f"failed, {e}" if isinstance(e, (RuntimeError, ValueError)) and len(str(e)) < 80 else "failed")
+
+
 def run_once(transcript, last):
     print(f'heard: "{transcript}"', flush=True)
     task = route(transcript, context=last or None)
@@ -89,36 +94,38 @@ def run_once(transcript, last):
         print(f"recording -> {record_dir}")
 
     state, agent = None, None
-    for attempt in range(2):
-        try:
-            agent = _agent_cls()(task["url"], task["goals"], record_dir=record_dir)
-            state, aborted = _run_agent(agent)
-        except Exception as e:
-            if agent is not None:
-                agent.close()
-            print(f"agent failed: {e}", flush=True)
-            say("failed")
-            return
-        if aborted:
+    try:
+        agent = _agent_cls()(task["url"], task["goals"], record_dir=record_dir)
+        state, aborted = _run_agent(agent)
+    except Exception as e:
+        if agent is not None:
             agent.close()
-            print("aborted", flush=True)
-            say("stopped")
-            return
-        # Blocked with zero actions = the SPA hadn't rendered yet. Retry once.
-        dead = state["status"] == "blocked" and not state.get("history")
-        if dead and attempt == 0:
-            agent.close()
-            print("page was empty on load; retrying once", flush=True)
-            continue
-        break
+        _fail(e)
+        return
+    if aborted:
+        agent.close()
+        print("aborted", flush=True)
+        say("stopped")
+        return
+    # Blocked with zero actions on an empty page = the site never loaded. Don't
+    # ask decide() to plan against a blank page.
+    if state["status"] == "blocked" and not state["history"] and not (state["page"].get("text") or "").strip():
+        agent.close()
+        print("page did not load", flush=True)
+        say("the page didn't load")
+        return
 
     # observe -> decide phases: the model sees the real page and picks the next
     # step (or done / clarify). Same tab unless the model wants another site.
     # A phase that adds no actions means the page can't advance — stop looping.
+    answer = None
     for _ in range(3):
         prev_len = len(state["history"])
-        nxt = decide(transcript, state["page"], state["history"])
-        if not nxt or nxt.get("status") == "done":
+        nxt = decide(transcript, state["page"], state["history"], state["status"])
+        if nxt is None:
+            break
+        if nxt.get("status") == "done":
+            answer = nxt.get("answer")
             break
         if "clarify" in nxt:
             agent.close()
@@ -136,8 +143,7 @@ def run_once(transcript, last):
             try:
                 agent = _agent_cls()(nxt["url"], goals, record_dir=record_dir)
             except Exception as e:
-                print(f"agent failed: {e}", flush=True)
-                say("failed")
+                _fail(e)
                 return
         else:
             agent.state["goal"] = "\n".join(goals)
@@ -146,8 +152,7 @@ def run_once(transcript, last):
             state, aborted = _run_agent(agent)
         except Exception as e:
             agent.close()
-            print(f"agent failed: {e}", flush=True)
-            say("failed")
+            _fail(e)
             return
         if aborted:
             agent.close()
@@ -171,19 +176,28 @@ def run_once(transcript, last):
         last.clear()
         last["url"] = (state.get("page") or {}).get("url") or task["url"]
         last["request"] = transcript
-        speak_result(state, transcript)
+        if answer:
+            say(answer)
+        else:
+            speak_result(state, transcript)
 
 
 def main():
     _load_env()
     last = {}  # follow-up context: {"url", "request"} from the previous run
-    if len(sys.argv) > 1:  # uv run holler "open github" -- one shot, no mic
-        run_once(" ".join(sys.argv[1:]), last)
-        return
-    while True:
-        transcript = listen()
-        if transcript:
-            run_once(transcript, last)
+    try:
+        if len(sys.argv) > 1:  # uv run holler "open github" -- one shot, no mic
+            run_once(" ".join(sys.argv[1:]), last)
+            return
+        while True:
+            transcript = listen()
+            if transcript:
+                run_once(transcript, last)
+    finally:
+        if os.environ.get("HOLLER_AGENT") != "jev":
+            from .jevbu import shutdown
+
+            shutdown()
 
 
 if __name__ == "__main__":
